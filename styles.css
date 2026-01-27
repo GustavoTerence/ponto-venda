@@ -123,6 +123,17 @@ td {
   margin-top: 12px;
 }
 
+.inline-fields {
+  display: grid;
+  grid-template-columns: 2fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-fields button {
+  white-space: nowrap;
+}
+
 .filters,
 .sale-options {
   display: grid;
