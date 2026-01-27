@@ -14,6 +14,28 @@
 
     <main class="app-grid">
       <section class="card">
+        <h2>Warehouses</h2>
+        <form id="warehouse-form" class="form-grid">
+          <label>
+            Nome do warehouse
+            <input type="text" name="warehouseName" required />
+          </label>
+          <button type="submit">Adicionar warehouse</button>
+        </form>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Warehouse</th>
+                <th>Acoes</th>
+              </tr>
+            </thead>
+            <tbody id="warehouse-table"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>Cadastro de Produtos</h2>
         <form id="product-form" class="form-grid">
           <label>
@@ -54,13 +76,38 @@
             <input type="number" name="margin" step="0.01" min="0" readonly />
           </label>
           <label>
-            Estoque
-            <input type="number" name="stock" min="0" required />
+            Estoque total
+            <input type="number" name="stock" min="0" required readonly />
           </label>
           <label>
             Estoque minimo
             <input type="number" name="minStock" min="0" />
           </label>
+          <label class="full">
+            Estoque por warehouse
+            <div class="inline-fields">
+              <select id="product-stock-warehouse"></select>
+              <input
+                type="number"
+                id="product-stock-quantity"
+                min="0"
+                placeholder="Qtd"
+              />
+              <button type="button" id="product-stock-add">Adicionar</button>
+            </div>
+          </label>
+          <div class="table-wrapper full">
+            <table>
+              <thead>
+                <tr>
+                  <th>Warehouse</th>
+                  <th>Quantidade</th>
+                  <th>Acoes</th>
+                </tr>
+              </thead>
+              <tbody id="product-stock-table"></tbody>
+            </table>
+          </div>
           <label>
             Fornecedor
             <input type="text" name="supplier" placeholder="Ex: Distribuidora X" />
@@ -110,6 +157,7 @@
                 <th>Categoria</th>
                 <th>Preco</th>
                 <th>Estoque</th>
+                <th>Warehouses</th>
                 <th>Status</th>
                 <th>Acoes</th>
               </tr>
@@ -127,6 +175,10 @@
             <select name="productId" required></select>
           </label>
           <label>
+            Warehouse
+            <select name="warehouseId" required></select>
+          </label>
+          <label>
             Quantidade
             <input type="number" name="quantity" min="1" value="1" required />
           </label>
@@ -139,6 +191,7 @@
             <thead>
               <tr>
                 <th>Produto</th>
+                <th>Warehouse</th>
                 <th>Qtd</th>
                 <th>Preco</th>
                 <th>Subtotal</th>
