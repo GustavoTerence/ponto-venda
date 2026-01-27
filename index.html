@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ponto de Venda</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>Ponto de Venda</h1>
+      <p>Cadastre produtos e registre vendas.</p>
+    </header>
+
+    <main class="app-grid">
+      <section class="card">
+        <h2>Cadastro de Produtos</h2>
+        <form id="product-form" class="form-grid">
+          <label>
+            Nome
+            <input type="text" name="name" required />
+          </label>
+          <label>
+            Categoria
+            <input type="text" name="category" placeholder="Ex: Bebidas" />
+          </label>
+          <label>
+            SKU
+            <input type="text" name="sku" placeholder="Ex: 000123" />
+          </label>
+          <label>
+            Codigo de barras
+            <input type="text" name="barcode" placeholder="Ex: 7890000000000" />
+          </label>
+          <label>
+            Unidade
+            <select name="unit">
+              <option value="un">Unidade</option>
+              <option value="kg">Kg</option>
+              <option value="lt">Litro</option>
+              <option value="cx">Caixa</option>
+            </select>
+          </label>
+          <label>
+            Preco (R$)
+            <input type="number" name="price" step="0.01" min="0" required />
+          </label>
+          <label>
+            Custo (R$)
+            <input type="number" name="cost" step="0.01" min="0" />
+          </label>
+          <label>
+            Margem (%)
+            <input type="number" name="margin" step="0.01" min="0" readonly />
+          </label>
+          <label>
+            Estoque
+            <input type="number" name="stock" min="0" required />
+          </label>
+          <label>
+            Estoque minimo
+            <input type="number" name="minStock" min="0" />
+          </label>
+          <label>
+            Fornecedor
+            <input type="text" name="supplier" placeholder="Ex: Distribuidora X" />
+          </label>
+          <label>
+            Status
+            <select name="status">
+              <option value="active">Ativo</option>
+              <option value="inactive">Inativo</option>
+            </select>
+          </label>
+          <label class="full">
+            Observacoes
+            <textarea name="notes" rows="3" placeholder="Informacoes adicionais"></textarea>
+          </label>
+          <button type="submit">Salvar produto</button>
+          <button type="button" id="product-cancel" class="ghost">Cancelar</button>
+        </form>
+
+        <div class="filters">
+          <label>
+            Buscar
+            <input type="text" id="product-search" placeholder="Nome, SKU ou codigo" />
+          </label>
+          <label>
+            Categoria
+            <select id="product-filter-category">
+              <option value="">Todas</option>
+            </select>
+          </label>
+          <label>
+            Status
+            <select id="product-filter-status">
+              <option value="">Todos</option>
+              <option value="active">Ativo</option>
+              <option value="inactive">Inativo</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Produto</th>
+                <th>SKU</th>
+                <th>Categoria</th>
+                <th>Preco</th>
+                <th>Estoque</th>
+                <th>Status</th>
+                <th>Acoes</th>
+              </tr>
+            </thead>
+            <tbody id="product-table"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Venda</h2>
+        <form id="sale-form" class="form-grid">
+          <label>
+            Produto
+            <select name="productId" required></select>
+          </label>
+          <label>
+            Quantidade
+            <input type="number" name="quantity" min="1" value="1" required />
+          </label>
+          <button type="submit">Adicionar ao carrinho</button>
+          <button type="button" id="sale-clear" class="ghost">Limpar carrinho</button>
+        </form>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Produto</th>
+                <th>Qtd</th>
+                <th>Preco</th>
+                <th>Subtotal</th>
+                <th>Acoes</th>
+              </tr>
+            </thead>
+            <tbody id="cart-table"></tbody>
+          </table>
+        </div>
+        <div class="sale-options">
+          <label>
+            Desconto (R$)
+            <input type="number" id="cart-discount" step="0.01" min="0" value="0" />
+          </label>
+          <label>
+            Pagamento
+            <select id="payment-method">
+              <option value="Dinheiro">Dinheiro</option>
+              <option value="Cartao">Cartao</option>
+              <option value="Pix">Pix</option>
+              <option value="Boleto">Boleto</option>
+            </select>
+          </label>
+          <label class="full">
+            Observacoes da venda
+            <textarea id="sale-note" rows="2" placeholder="Ex: cliente pediu entrega"></textarea>
+          </label>
+        </div>
+        <div class="cart-summary">
+          <span>Subtotal: <strong id="cart-subtotal">R$ 0,00</strong></span>
+          <span>Desconto: <strong id="cart-discount-value">R$ 0,00</strong></span>
+          <span>Total: <strong id="cart-total">R$ 0,00</strong></span>
+          <button id="checkout" class="primary">Finalizar venda</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Historico de Vendas</h2>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Itens</th>
+                <th>Pagamento</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody id="sales-table"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <span>Dados salvos no navegador (localStorage).</span>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>
