@@ -1,0 +1,566 @@
+services:
+  traefik:
+    image: traefik:v2.11
+    container_name: traefik
+    command:
+      - --api.dashboard=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - data-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.traefik.rule=Host(`traefik.localhost`)
+      - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.routers.traefik.service=api@internal
+
+  portainer:
+    image: portainer/portainer-ce:2.20.3
+    container_name: portainer
+    command: -H unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - data-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.portainer.rule=Host(`portainer.localhost`)
+      - traefik.http.routers.portainer.entrypoints=web
+      - traefik.http.services.portainer.loadbalancer.server.port=9000
+
+  minio:
+    image: minio/minio:RELEASE.2021-04-06T23-11-00Z
+    container_name: minio
+    command: server /data
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    networks:
+      - data-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.minio.rule=Host(`minio.localhost`)
+      - traefik.http.routers.minio.entrypoints=web
+      - traefik.http.services.minio.loadbalancer.server.port=9000
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do
+        echo 'Aguardando MinIO...';
+        sleep 3;
+      done;
+      mc mb -p local/warehouse || true;
+      mc mb -p local/datalake || true;
+      mc anonymous set download local/warehouse || true;
+      exit 0"
+    networks:
+      - data-net
+
+  postgres:
+    image: postgres:16
+    container_name: metastore-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - data-net
+
+  airflow-db:
+    image: postgres:16
+    container_name: airflow-db
+    environment:
+      - POSTGRES_USER=${AIRFLOW_DB_USER}
+      - POSTGRES_PASSWORD=${AIRFLOW_DB_PASSWORD}
+      - POSTGRES_DB=${AIRFLOW_DB_NAME}
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    networks:
+      - data-net
+
+  airflow-init:
+    image: apache/airflow:2.9.2
+    container_name: airflow-init
+    user: "0:0"
+    depends_on:
+      - airflow-db
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/${AIRFLOW_DB_NAME}
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW_FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False
+      - _AIRFLOW_WWW_USER_CREATE=True
+      - _AIRFLOW_WWW_USER_USERNAME=${AIRFLOW_ADMIN_USER}
+      - _AIRFLOW_WWW_USER_PASSWORD=${AIRFLOW_ADMIN_PASSWORD}
+    entrypoint: /bin/bash
+    command: >
+      -c "mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins &&
+      chown -R ${AIRFLOW_UID}:${AIRFLOW_GID} /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins &&
+      su airflow -c 'airflow db init' &&
+      su airflow -c 'airflow users create
+      --role Admin
+      --username ${AIRFLOW_ADMIN_USER}
+      --password ${AIRFLOW_ADMIN_PASSWORD}
+      --firstname Admin
+      --lastname User
+      --email admin@example.com' || true"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks:
+      - data-net
+
+  airflow-webserver:
+    image: apache/airflow:2.9.2
+    container_name: airflow-webserver
+    user: "0:0"
+    depends_on:
+      - airflow-db
+      - airflow-init
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/${AIRFLOW_DB_NAME}
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW_FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False
+    command: webserver
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks:
+      - data-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.airflow.rule=Host(`airflow.localhost`)
+      - traefik.http.routers.airflow.entrypoints=web
+      - traefik.http.services.airflow.loadbalancer.server.port=8080
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.2
+    container_name: airflow-scheduler
+    user: "0:0"
+    depends_on:
+      - airflow-db
+      - airflow-init
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/${AIRFLOW_DB_NAME}
+      - AIRFLOW__CORE__FERNET_KEY=${AIRFLOW_FERNET_KEY}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False
+    command: scheduler
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    networks:
+      - data-net
+
+  hive-metastore:
+    image: bitsondatadev/hive-metastore:latest
+    container_name: hive-metastore
+    depends_on:
+      - postgres
+      - minio
+    environment:
+      - METASTORE_DB_HOSTNAME=postgres
+      - METASTORE_DB_PORT=5432
+      - METASTORE_DB_NAME=${POSTGRES_DB}
+      - METASTORE_DB_USER=${POSTGRES_USER}
+      - METASTORE_DB_PASS=${POSTGRES_PASSWORD}
+      - HIVE_METASTORE_URI=thrift://hive-metastore:9083
+      - HIVE_WAREHOUSE_DIR=s3a://warehouse/
+      - S3_ENDPOINT=http://minio:9000
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - S3_PATH_STYLE_ACCESS=true
+    volumes:
+      - ./hive/conf:/opt/hive/conf
+    networks:
+      - data-net
+
+  trino:
+    image: trinodb/trino:443
+    container_name: trino
+    depends_on:
+      - hive-metastore
+    volumes:
+      - ./trino/etc:/etc/trino
+    networks:
+      - data-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.trino.rule=Host(`trino.localhost`)
+      - traefik.http.routers.trino.entrypoints=web
+      - traefik.http.services.trino.loadbalancer.server.port=8080
+
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host spark-master
+      --port 7077
+      --webui-port 8081
+    networks:
+      - data-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.spark.rule=Host(`spark.localhost`)
+      - traefik.http.routers.spark.entrypoints=web
+      - traefik.http.services.spark.loadbalancer.server.port=8081
+
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077
+    networks:
+      - data-net
+
+  dbt:
+    image: ghcr.io/dbt-labs/dbt-postgres:latest
+    container_name: dbt
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+    volumes:
+      - ./dbt:/usr/app
+    networks:
+      - data-net
+
+  docker-proxy:
+    image: alpine/socat
+    container_name: airbyte-docker-proxy
+    command: -t 900 TCP-LISTEN:2375,fork,reuseaddr UNIX-CONNECT:/var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - data-net
+
+  airbyte-db:
+    image: airbyte/db:${AIRBYTE_VERSION}
+    container_name: airbyte-db
+    environment:
+      - POSTGRES_USER=${DATABASE_USER}
+      - POSTGRES_PASSWORD=${DATABASE_PASSWORD}
+      - POSTGRES_DB=${AIRBYTE_DB_NAME}
+    volumes:
+      - airbyte_db:/var/lib/postgresql/data
+    networks:
+      - data-net
+
+  airbyte-temporal:
+    image: airbyte/temporal:${AIRBYTE_VERSION}
+    container_name: airbyte-temporal
+    depends_on:
+      - airbyte-db
+    environment:
+      - DB=postgresql
+      - POSTGRES_SEEDS=airbyte-db
+      - POSTGRES_DB=${AIRBYTE_DB_NAME}
+      - POSTGRES_USER=${DATABASE_USER}
+      - POSTGRES_PWD=${DATABASE_PASSWORD}
+      - DB_PORT=5432
+    volumes:
+      - airbyte_temporal:/data
+    networks:
+      - data-net
+
+  airbyte-bootloader:
+    image: airbyte/bootloader:${AIRBYTE_VERSION}
+    container_name: airbyte-bootloader
+    depends_on:
+      - airbyte-db
+      - airbyte-temporal
+    environment:
+      - AIRBYTE_VERSION=${AIRBYTE_VERSION}
+      - VERSION=${VERSION}
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_USER=${DATABASE_USER}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - CONNECTOR_REGISTRY_BASE_URL=${CONNECTOR_REGISTRY_BASE_URL}
+      - CONNECTOR_REGISTRY_SEED_PROVIDER=${CONNECTOR_REGISTRY_SEED_PROVIDER}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - CONFIG_DATABASE_URL=${CONFIG_DATABASE_URL}
+      - CONFIG_DATABASE_USER=${CONFIG_DATABASE_USER}
+      - CONFIG_DATABASE_PASSWORD=${CONFIG_DATABASE_PASSWORD}
+      - WORKSPACE_ROOT=${WORKSPACE_ROOT}
+      - WORKSPACE_DOCKER_MOUNT=${WORKSPACE_DOCKER_MOUNT}
+      - CONFIG_ROOT=${CONFIG_ROOT}
+      - DATA_DOCKER_MOUNT=${DATA_DOCKER_MOUNT}
+      - LOCAL_ROOT=${LOCAL_ROOT}
+      - LOCAL_DOCKER_MOUNT=${LOCAL_DOCKER_MOUNT}
+      - STORAGE_TYPE=${STORAGE_TYPE}
+      - STORAGE_BUCKET_ACTIVITY_PAYLOAD=${STORAGE_BUCKET_ACTIVITY_PAYLOAD}
+      - STORAGE_BUCKET_LOG=${STORAGE_BUCKET_LOG}
+      - STORAGE_BUCKET_STATE=${STORAGE_BUCKET_STATE}
+      - STORAGE_BUCKET_WORKLOAD_OUTPUT=${STORAGE_BUCKET_WORKLOAD_OUTPUT}
+      - CONFIGS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION=${CONFIGS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION}
+      - JOBS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION=${JOBS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION}
+      - AIRBYTE_SECRET_PERSISTENCE=${AIRBYTE_SECRET_PERSISTENCE}
+      - SECRET_PERSISTENCE=${SECRET_PERSISTENCE}
+      - DATASOURCES_LOCAL_SECRETS_URL=${DATABASE_URL}
+      - DATASOURCES_LOCAL_SECRETS_DRIVER_CLASS_NAME=org.postgresql.Driver
+      - DATASOURCES_LOCAL_SECRETS_USERNAME=${DATABASE_USER}
+      - DATASOURCES_LOCAL_SECRETS_PASSWORD=${DATABASE_PASSWORD}
+      - DATASOURCES_LOCAL_URL=${LOCAL_SECRETS_URL}
+      - DATASOURCES_LOCAL_DRIVER_CLASS_NAME=org.postgresql.Driver
+      - DATASOURCES_LOCAL_USERNAME=${LOCAL_SECRETS_USERNAME}
+      - DATASOURCES_LOCAL_PASSWORD=${LOCAL_SECRETS_PASSWORD}
+      - >-
+        MICRONAUT_APPLICATION_JSON={"datasources":{"local-secrets":{"url":"${DATABASE_URL}","username":"${DATABASE_USER}","password":"${DATABASE_PASSWORD}","driverClassName":"org.postgresql.Driver"}}}
+    volumes:
+      - workspace:${WORKSPACE_ROOT}
+      - local_root:${LOCAL_ROOT}
+      - data:${CONFIG_ROOT}
+    networks:
+      - data-net
+
+  airbyte-server:
+    image: airbyte/server:${AIRBYTE_VERSION}
+    container_name: airbyte-server
+    depends_on:
+      - airbyte-db
+      - airbyte-temporal
+      - airbyte-bootloader
+    environment:
+      - AIRBYTE_VERSION=${AIRBYTE_VERSION}
+      - VERSION=${VERSION}
+      - AIRBYTE_ROLE=${AIRBYTE_ROLE}
+      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE}
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_USER=${DATABASE_USER}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - CONFIG_DATABASE_URL=${CONFIG_DATABASE_URL}
+      - CONFIG_DATABASE_USER=${CONFIG_DATABASE_USER}
+      - CONFIG_DATABASE_PASSWORD=${CONFIG_DATABASE_PASSWORD}
+      - TEMPORAL_HOST=airbyte-temporal:7233
+      - WORKSPACE_ROOT=${WORKSPACE_ROOT}
+      - WORKSPACE_DOCKER_MOUNT=${WORKSPACE_DOCKER_MOUNT}
+      - CONFIG_ROOT=${CONFIG_ROOT}
+      - DATA_DOCKER_MOUNT=${DATA_DOCKER_MOUNT}
+      - LOCAL_ROOT=${LOCAL_ROOT}
+      - LOCAL_DOCKER_MOUNT=${LOCAL_DOCKER_MOUNT}
+      - STORAGE_TYPE=${STORAGE_TYPE}
+      - STORAGE_BUCKET_ACTIVITY_PAYLOAD=${STORAGE_BUCKET_ACTIVITY_PAYLOAD}
+      - STORAGE_BUCKET_LOG=${STORAGE_BUCKET_LOG}
+      - STORAGE_BUCKET_STATE=${STORAGE_BUCKET_STATE}
+      - STORAGE_BUCKET_WORKLOAD_OUTPUT=${STORAGE_BUCKET_WORKLOAD_OUTPUT}
+      - CONFIGS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION=${CONFIGS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION}
+      - JOBS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION=${JOBS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION}
+      - AIRBYTE_SECRET_PERSISTENCE=${AIRBYTE_SECRET_PERSISTENCE}
+      - SECRET_PERSISTENCE=${SECRET_PERSISTENCE}
+      - WORKER_ENVIRONMENT=${WORKER_ENVIRONMENT}
+      - INTERNAL_API_HOST=${INTERNAL_API_HOST}
+      - INTERNAL_API_URL=${INTERNAL_API_URL}
+      - AIRBYTE_API_HOST=${AIRBYTE_API_HOST}
+      - AIRBYTE_API_URL=${AIRBYTE_API_URL}
+      - CONNECTOR_BUILDER_API_HOST=${CONNECTOR_BUILDER_API_HOST}
+      - CONNECTOR_BUILDER_SERVER_API_HOST=${CONNECTOR_BUILDER_SERVER_API_HOST}
+      - WORKLOAD_API_HOST=${WORKLOAD_API_HOST}
+      - WORKLOAD_API_URL=${WORKLOAD_API_URL}
+      - CONNECTOR_REGISTRY_BASE_URL=${CONNECTOR_REGISTRY_BASE_URL}
+      - CONNECTOR_REGISTRY_SEED_PROVIDER=${CONNECTOR_REGISTRY_SEED_PROVIDER}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - AUTO_DETECT_SCHEMA=${AUTO_DETECT_SCHEMA}
+      - AUTO_DISABLE_FAILING_CONNECTIONS=${AUTO_DISABLE_FAILING_CONNECTIONS}
+      - FEATURE_FLAG_CLIENT=${FEATURE_FLAG_CLIENT}
+      - TRACKING_STRATEGY=${TRACKING_STRATEGY}
+      - SEGMENT_WRITE_KEY=${SEGMENT_WRITE_KEY}
+      - JOB_ERROR_REPORTING_STRATEGY=${JOB_ERROR_REPORTING_STRATEGY}
+      - DATASOURCES_LOCAL_SECRETS_URL=${DATABASE_URL}
+      - DATASOURCES_LOCAL_SECRETS_DRIVER_CLASS_NAME=org.postgresql.Driver
+      - DATASOURCES_LOCAL_SECRETS_USERNAME=${DATABASE_USER}
+      - DATASOURCES_LOCAL_SECRETS_PASSWORD=${DATABASE_PASSWORD}
+      - DATASOURCES_LOCAL_URL=${LOCAL_SECRETS_URL}
+      - DATASOURCES_LOCAL_DRIVER_CLASS_NAME=org.postgresql.Driver
+      - DATASOURCES_LOCAL_USERNAME=${LOCAL_SECRETS_USERNAME}
+      - DATASOURCES_LOCAL_PASSWORD=${LOCAL_SECRETS_PASSWORD}
+      - >-
+        MICRONAUT_APPLICATION_JSON={"datasources":{"local-secrets":{"url":"${DATABASE_URL}","username":"${DATABASE_USER}","password":"${DATABASE_PASSWORD}","driverClassName":"org.postgresql.Driver"}}}
+    volumes:
+      - workspace:${WORKSPACE_ROOT}
+      - local_root:${LOCAL_ROOT}
+      - data:${CONFIG_ROOT}
+    networks:
+      - data-net
+
+  airbyte-worker:
+    image: airbyte/worker:${AIRBYTE_VERSION}
+    container_name: airbyte-worker
+    depends_on:
+      - airbyte-server
+    environment:
+      - AIRBYTE_VERSION=${AIRBYTE_VERSION}
+      - VERSION=${VERSION}
+      - AIRBYTE_ROLE=${AIRBYTE_ROLE}
+      - DEPLOYMENT_MODE=${DEPLOYMENT_MODE}
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_USER=${DATABASE_USER}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - CONFIG_DATABASE_URL=${CONFIG_DATABASE_URL}
+      - CONFIG_DATABASE_USER=${CONFIG_DATABASE_USER}
+      - CONFIG_DATABASE_PASSWORD=${CONFIG_DATABASE_PASSWORD}
+      - TEMPORAL_HOST=airbyte-temporal:7233
+      - WORKSPACE_ROOT=${WORKSPACE_ROOT}
+      - WORKSPACE_DOCKER_MOUNT=${WORKSPACE_DOCKER_MOUNT}
+      - CONFIG_ROOT=${CONFIG_ROOT}
+      - DATA_DOCKER_MOUNT=${DATA_DOCKER_MOUNT}
+      - LOCAL_ROOT=${LOCAL_ROOT}
+      - LOCAL_DOCKER_MOUNT=${LOCAL_DOCKER_MOUNT}
+      - STORAGE_TYPE=${STORAGE_TYPE}
+      - STORAGE_BUCKET_ACTIVITY_PAYLOAD=${STORAGE_BUCKET_ACTIVITY_PAYLOAD}
+      - STORAGE_BUCKET_LOG=${STORAGE_BUCKET_LOG}
+      - STORAGE_BUCKET_STATE=${STORAGE_BUCKET_STATE}
+      - STORAGE_BUCKET_WORKLOAD_OUTPUT=${STORAGE_BUCKET_WORKLOAD_OUTPUT}
+      - CONFIGS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION=${CONFIGS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION}
+      - JOBS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION=${JOBS_DATABASE_MINIMUM_FLYWAY_MIGRATION_VERSION}
+      - AIRBYTE_SECRET_PERSISTENCE=${AIRBYTE_SECRET_PERSISTENCE}
+      - SECRET_PERSISTENCE=${SECRET_PERSISTENCE}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - LOG_CONNECTOR_MESSAGES=${LOG_CONNECTOR_MESSAGES}
+      - AUTO_DETECT_SCHEMA=${AUTO_DETECT_SCHEMA}
+      - AUTO_DISABLE_FAILING_CONNECTIONS=${AUTO_DISABLE_FAILING_CONNECTIONS}
+      - FEATURE_FLAG_CLIENT=${FEATURE_FLAG_CLIENT}
+      - TRACKING_STRATEGY=${TRACKING_STRATEGY}
+      - SEGMENT_WRITE_KEY=${SEGMENT_WRITE_KEY}
+      - JOB_ERROR_REPORTING_STRATEGY=${JOB_ERROR_REPORTING_STRATEGY}
+      - SYNC_JOB_MAX_ATTEMPTS=${SYNC_JOB_MAX_ATTEMPTS}
+      - SYNC_JOB_MAX_TIMEOUT_DAYS=${SYNC_JOB_MAX_TIMEOUT_DAYS}
+      - SYNC_JOB_INIT_RETRY_TIMEOUT_MINUTES=${SYNC_JOB_INIT_RETRY_TIMEOUT_MINUTES}
+      - MAX_SYNC_WORKERS=${MAX_SYNC_WORKERS}
+      - MAX_SPEC_WORKERS=${MAX_SPEC_WORKERS}
+      - MAX_CHECK_WORKERS=${MAX_CHECK_WORKERS}
+      - MAX_DISCOVER_WORKERS=${MAX_DISCOVER_WORKERS}
+      - MAX_NOTIFY_WORKERS=${MAX_NOTIFY_WORKERS}
+      - SHOULD_RUN_NOTIFY_WORKFLOWS=${SHOULD_RUN_NOTIFY_WORKFLOWS}
+      - ACTIVITY_MAX_ATTEMPT=${ACTIVITY_MAX_ATTEMPT}
+      - ACTIVITY_INITIAL_DELAY_BETWEEN_ATTEMPTS_SECONDS=${ACTIVITY_INITIAL_DELAY_BETWEEN_ATTEMPTS_SECONDS}
+      - ACTIVITY_MAX_DELAY_BETWEEN_ATTEMPTS_SECONDS=${ACTIVITY_MAX_DELAY_BETWEEN_ATTEMPTS_SECONDS}
+      - WORKFLOW_FAILURE_RESTART_DELAY_SECONDS=${WORKFLOW_FAILURE_RESTART_DELAY_SECONDS}
+      - WORKER_ENVIRONMENT=${WORKER_ENVIRONMENT}
+      - DOCKER_HOST=docker-proxy:2375
+      - INTERNAL_API_HOST=${INTERNAL_API_HOST}
+      - INTERNAL_API_URL=${INTERNAL_API_URL}
+      - AIRBYTE_SERVER_HOST=${AIRBYTE_SERVER_HOST}
+      - AIRBYTE_API_HOST=${AIRBYTE_API_HOST}
+      - AIRBYTE_API_URL=${AIRBYTE_API_URL}
+      - WEBAPP_URL=${WEBAPP_URL}
+      - CONNECTOR_BUILDER_API_HOST=${CONNECTOR_BUILDER_API_HOST}
+      - CONNECTOR_BUILDER_SERVER_API_HOST=${CONNECTOR_BUILDER_SERVER_API_HOST}
+      - WORKLOAD_API_HOST=${WORKLOAD_API_HOST}
+      - WORKLOAD_API_URL=${WORKLOAD_API_URL}
+      - CONNECTOR_REGISTRY_BASE_URL=${CONNECTOR_REGISTRY_BASE_URL}
+      - CONNECTOR_REGISTRY_SEED_PROVIDER=${CONNECTOR_REGISTRY_SEED_PROVIDER}
+      - LOCAL_CONNECTOR_CATALOG_PATH=${LOCAL_CONNECTOR_CATALOG_PATH}
+      - MICRONAUT_ENVIRONMENTS=${WORKERS_MICRONAUT_ENVIRONMENTS}
+      - DATASOURCES_LOCAL_SECRETS_URL=${DATABASE_URL}
+      - DATASOURCES_LOCAL_SECRETS_DRIVER_CLASS_NAME=org.postgresql.Driver
+      - DATASOURCES_LOCAL_SECRETS_USERNAME=${DATABASE_USER}
+      - DATASOURCES_LOCAL_SECRETS_PASSWORD=${DATABASE_PASSWORD}
+      - DATASOURCES_LOCAL_URL=${LOCAL_SECRETS_URL}
+      - DATASOURCES_LOCAL_DRIVER_CLASS_NAME=org.postgresql.Driver
+      - DATASOURCES_LOCAL_USERNAME=${LOCAL_SECRETS_USERNAME}
+      - DATASOURCES_LOCAL_PASSWORD=${LOCAL_SECRETS_PASSWORD}
+      - >-
+        MICRONAUT_APPLICATION_JSON={"datasources":{"local-secrets":{"url":"${DATABASE_URL}","username":"${DATABASE_USER}","password":"${DATABASE_PASSWORD}","driverClassName":"org.postgresql.Driver"}}}
+    volumes:
+      - workspace:${WORKSPACE_ROOT}
+      - local_root:${LOCAL_ROOT}
+      - data:${CONFIG_ROOT}
+    networks:
+      - data-net
+
+  airbyte-webapp:
+    image: airbyte/webapp:${AIRBYTE_VERSION}
+    container_name: airbyte-webapp
+    depends_on:
+      - airbyte-server
+    environment:
+      - INTERNAL_API_HOST=airbyte-server
+      - INTERNAL_API_PORT=8001
+      - AIRBYTE_SERVER_HOST=airbyte-server
+      - CONNECTOR_BUILDER_API_HOST=${CONNECTOR_BUILDER_API_HOST}
+      - KEYCLOAK_INTERNAL_HOST=${KEYCLOAK_INTERNAL_HOST}
+    networks:
+      - data-net
+
+  airbyte-api-server:
+    image: airbyte/airbyte-api-server:${AIRBYTE_VERSION}
+    container_name: airbyte-api-server
+    depends_on:
+      - airbyte-bootloader
+    environment:
+      - AIRBYTE_VERSION=${AIRBYTE_VERSION}
+      - INTERNAL_API_HOST=airbyte-server
+      - INTERNAL_API_PORT=8001
+    networks:
+      - data-net
+
+  airbyte-connector-builder-server:
+    image: airbyte/connector-builder-server:${AIRBYTE_VERSION}
+    container_name: airbyte-connector-builder-server
+    depends_on:
+      - airbyte-bootloader
+    environment:
+      - AIRBYTE_VERSION=${AIRBYTE_VERSION}
+    networks:
+      - data-net
+
+  airbyte-proxy:
+    image: airbyte/proxy:${AIRBYTE_VERSION}
+    container_name: airbyte-proxy
+    depends_on:
+      - airbyte-webapp
+      - airbyte-server
+      - airbyte-api-server
+      - airbyte-connector-builder-server
+    networks:
+      - data-net
+    environment:
+      - BASIC_AUTH_USERNAME=${BASIC_AUTH_USERNAME}
+      - BASIC_AUTH_PASSWORD=${BASIC_AUTH_PASSWORD}
+      - BASIC_AUTH_PROXY_TIMEOUT=${BASIC_AUTH_PROXY_TIMEOUT}
+      - AIRBYTE_SERVER_HOST=${AIRBYTE_SERVER_HOST}
+      - CONNECTOR_BUILDER_API_HOST=${CONNECTOR_BUILDER_API_HOST}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.airbyte.rule=Host(`airbyte.localhost`)
+      - traefik.http.routers.airbyte.entrypoints=web
+      - traefik.http.services.airbyte.loadbalancer.server.port=8000
+
+networks:
+  data-net:
+    name: data-net
+
+volumes:
+  minio_data:
+  postgres_data:
+  portainer_data:
+  airflow_postgres_data:
+  airbyte_db:
+  airbyte_temporal:
+  workspace:
+  local_root:
+  data:
